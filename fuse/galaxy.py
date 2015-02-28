@@ -19,7 +19,6 @@ https://github.com/drpowell/galaxy-fuse .
 from errno import ENOENT
 from stat import S_IFDIR, S_IFREG, S_IFLNK
 from sys import argv, exit
-import re
 import time
 import os
 import argparse
