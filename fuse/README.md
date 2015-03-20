@@ -6,4 +6,6 @@
  - workflows
  - tools
 
+### Requirements
 
+ - [fusepy](http://github.com/terencehonles/fusepy)
