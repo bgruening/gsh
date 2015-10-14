@@ -9,6 +9,9 @@ from bioblend.galaxy.client import ConnectionError
 from stat import S_IFDIR, S_IFREG
 from fuse import Operations
 from fuse import FUSE, FuseOSError
+import logging
+logging.basicConfig(level=logging.DEBUG)
+log = logging.getLogger()
 
 
 class memoize(dict):
@@ -67,7 +70,7 @@ class GFSObject(Operations):
     def __init__(self, gfs):
         self.gfs = gfs
 
-    def __id_from_path(self, path_component):
+    def _id_from_path(self, path_component):
         return path_component[path_component.rfind('[')+1:path_component.rfind(']')]
 
 
@@ -185,14 +188,14 @@ class HistoryManager(GFSObject, GFSManager):
         if len(wd) == 2:  # == /histories -> Histories
             return Histories(self)
         elif len(wd) == 3:  # == /histories/Unnamed History [8997977]/ -> History
-            hist_id = self.__id_from_path(wd[2])
+            hist_id = self._id_from_path(wd[2])
             try:
                 return History(hist_id, self.gfs)
             except ConnectionError:
                 return Histories(self)
         elif len(wd) == 4:  # == /histories/Unnamed History [8997977]/Pasted Entry [5969b1f7201f12ae] -> HistoryDataset
-            hist_id = self.__id_from_path(wd[2])
-            dataset_id = self.__id_from_path(wd[3])
+            hist_id = self._id_from_path(wd[2])
+            dataset_id = self._id_from_path(wd[3])
             return History(hist_id, self.gfs).getDataset(dataset_id)
 
 
@@ -270,15 +273,15 @@ class LibraryManager(GFSObject, GFSManager):
         if len(wd) == 2:  # == /libraries -> Libraries
             return Libraries(self)
         elif len(wd) == 3:  # == /libraries/Unnamed Library [8997977]/ -> Library
-            lib_id = self.__id_from_path(wd[2])
+            lib_id = self._id_from_path(wd[2])
             # TODO: retry?
             try:
                 return Library(lib_id, self.gfs)
             except ConnectionError:
                 return Libraries(self)
         elif len(wd) == 4:  # == /libraries/Unnamed Library [8997977]/Pasted Entry [5969b1f7201f12ae] -> LibraryDataset
-            lib_id = self.__id_from_path(wd[2])
-            dataset_id = self.__id_from_path(wd[3])
+            lib_id = self._id_from_path(wd[2])
+            dataset_id = self._id_from_path(wd[3])
             return Library(lib_id, self.gfs).getDataset(dataset_id)
 
 
