@@ -9,60 +9,11 @@ from bioblend.galaxy.client import ConnectionError
 from stat import S_IFDIR, S_IFREG
 from fuse import Operations
 from fuse import FUSE, FuseOSError
+
+from repoze.lru import lru_cache
 import logging
 logging.basicConfig(level=logging.DEBUG)
 log = logging.getLogger()
-
-
-class memoize(dict):
-    """
-    Simple class to memoize function calls. We can call repeatedly and the
-    results will be cached. TODO: expire things on time? on some other mechanism?
-
-    https://wiki.python.org/moin/PythonDecoratorLibrary#Memoize
-    """
-    def __init__(self, func):
-        """Decorated function is stored in self.func"""
-        self.func = func
-
-    def __call__(self, *args, **kwargs):
-        """This intercepts the function call, and stores the result in self
-        (it's a dictionary subclass).
-
-        We key the dictionary based on parameters it was called with
-        """
-        return self[self.__gen_key(*args, **kwargs)]
-
-    def __missing__(self, key):
-        """If the result is missing from the self dictionary, this method is called.
-
-        Here we unpack the key, call the function, and store the result in self
-        as well as returning it."""
-        args, kwargs = self.__unpack_key(key)
-        self[key] = self.func(*args, **kwargs)
-        return self[key]
-
-    def __gen_key(self, *args, **kwargs):
-        """
-        How we generate a key. Must be a hashable type, hence the casting to tuple
-        """
-        return args + tuple([(k, v) for (k, v) in kwargs.iteritems()])
-
-    def __unpack_key(self, key):
-        """
-         Reverse of __gen_key(), unpack tuple back into args+kwargs
-        """
-        args = []
-        kwargs = {}
-        for x in key:
-            # TODO: This feels prone to failure. What if someone passes a tuple
-            # as a regular arg? What then?
-            if isinstance(x, tuple):
-                k, v = x
-                kwargs[k] = v
-            else:
-                args.append(x)
-        return args, kwargs
 
 
 class GFSObject(Operations):
@@ -264,6 +215,7 @@ class LibraryManager(GFSObject, GFSManager):
         self.transactionMap = {}
 
     def _path_bound(self, path):
+        import pprint; pprint.pprint(self.transactionMap)
         if path in self.transactionMap:
             wd = self.transactionMap.get(path).split(os.path.sep)
             del self.transactionMap[path]
@@ -274,7 +226,6 @@ class LibraryManager(GFSObject, GFSManager):
             return Libraries(self)
         elif len(wd) == 3:  # == /libraries/Unnamed Library [8997977]/ -> Library
             lib_id = self._id_from_path(wd[2])
-            # TODO: retry?
             try:
                 return Library(lib_id, self.gfs)
             except ConnectionError:
@@ -297,16 +248,16 @@ class Libraries(Directory, GFSObject):
         else:
             raise FuseOSError(ENOENT)
 
-    # @memoize
+    @lru_cache(maxsize=100)
+    def __list_libraries(self):
+        return self.gfs.gi.libraries.list()
+
     def readdir(self, path=None, fh=None):
-        # return super(Libraries, self).readdir() + \
-        return ['.', '..'] + \
-            self._format_path(self.gfs.gi.libraries.list())
+        return ['.', '..'] + self._format_path(self.__list_libraries())
 
     def mkdir(self, path=None, mode=None):
-        pass
-        # new_hist = self.gfs.gi.libraries.create(path[path.rfind(os.path.sep)+1:])
-        # self.manager.transactionMap[path] = '/libraries/{} [{}]'.format(new_hist.name, new_hist.id)
+        new_lib = self.gfs.gi.libraries.create(path[path.rfind(os.path.sep)+1:])
+        self.manager.transactionMap[path] = '/libraries/{0.name} [{0.id}]'.format(new_lib)
 
 
 class Library(Directory, GFSObject):
