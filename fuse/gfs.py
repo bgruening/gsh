@@ -11,10 +11,31 @@ from fuse import Operations
 from fuse import FUSE, FuseOSError
 
 
+class memoize(dict):
+    """
+    Simple class to memoize function calls. We can call repeatedly and the
+    results will be cached. TODO: expire things on time? on some other mechanism?
+
+    https://wiki.python.org/moin/PythonDecoratorLibrary#Memoize
+    """
+    def __init__(self, func):
+        self.func = func
+
+    def __call__(self, *args):
+        return self[args]
+
+    def __missing__(self, key):
+        result = self[key] = self.func(*key)
+        return result
+
+
 class GFSObject(Operations):
 
     def __init__(self, gfs):
         self.gfs = gfs
+
+    def __id_from_path(self, path_component):
+        return path_component[path_component.rfind('[')+1:path_component.rfind(']')]
 
 
 class GFSManager(Operations):
@@ -42,6 +63,7 @@ class GalaxyFS(Operations):
         self.path_bindings = {
             RootDirectory.context: self.root,
             HistoryManager.context: HistoryManager(self),
+            LibraryManager.context: LibraryManager(self),
         }
 
     def _path_bound(self, path):
@@ -127,14 +149,14 @@ class HistoryManager(GFSObject, GFSManager):
         if len(wd) == 2:  # == /histories -> Histories
             return Histories(self)
         elif len(wd) == 3:  # == /histories/Unnamed History [8997977]/ -> History
-            hist_id = wd[2][wd[2].rfind('[')+1:wd[2].rfind(']')]
+            hist_id = self.__id_from_path(wd[2])
             try:
                 return History(hist_id, self.gfs)
             except ConnectionError:
                 return Histories(self)
         elif len(wd) == 4:  # == /histories/Unnamed History [8997977]/Pasted Entry [5969b1f7201f12ae] -> HistoryDataset
-            hist_id = wd[2][wd[2].rfind('[')+1:wd[2].rfind(']')]
-            dataset_id = wd[3][wd[3].rfind('[')+1:wd[3].rfind(']')]
+            hist_id = self.__id_from_path(wd[2])
+            dataset_id = self.__id_from_path(wd[3])
             return History(hist_id, self.gfs).getDataset(dataset_id)
 
 
@@ -189,6 +211,91 @@ class HistoryDataset(File, GFSObject):
 
     def __init__(self, hist, dataset_id, gfs):
         super(HistoryDataset, self).__init__(gfs)
+        self.dataset = hist.get_dataset(dataset_id)
+
+    def unlink(self, path):
+        self.dataset.delete()
+
+
+class LibraryManager(GFSObject, GFSManager):
+    context = 'libraries'
+
+    def __init__(self, gfs):
+        super(LibraryManager, self).__init__(gfs)
+        self.transactionMap = {}
+
+    def _path_bound(self, path):
+        if path in self.transactionMap:
+            wd = self.transactionMap.get(path).split(os.path.sep)
+            del self.transactionMap[path]
+        else:
+            wd = path.split(os.path.sep)
+        if len(wd) == 2:  # == /libraries -> Libraries
+            return Libraries(self)
+        elif len(wd) == 3:  # == /libraries/Unnamed Library [8997977]/ -> Library
+            hist_id = self.__id_from_path(wd[2])
+            try:
+                return Library(hist_id, self.gfs)
+            except ConnectionError:
+                return Libraries(self)
+        elif len(wd) == 4:  # == /libraries/Unnamed Library [8997977]/Pasted Entry [5969b1f7201f12ae] -> LibraryDataset
+            hist_id = self.__id_from_path(wd[2])
+            dataset_id = self.__id_from_path(wd[3])
+            return Library(hist_id, self.gfs).getDataset(dataset_id)
+
+
+class Libraries(Directory, GFSObject):
+
+    def __init__(self, manager):
+        self.manager = manager
+        super(Libraries, self).__init__(manager.gfs)
+
+    def getattr(self, path=None, fh=None):
+        if path == '/libraries':
+            return super(Libraries, self).getattr(path, fh)
+        else:
+            raise FuseOSError(ENOENT)
+
+    def readdir(self, path=None, fh=None):
+        return [x.name+' ['+x.id+']' for x in self.gfs.gi.libraries.list()]+super(Libraries, self).readdir()
+
+    def mkdir(self, path=None, mode=None):
+        pass
+        # new_hist = self.gfs.gi.libraries.create(path[path.rfind(os.path.sep)+1:])
+        # self.manager.transactionMap[path] = '/libraries/{} [{}]'.format(new_hist.name, new_hist.id)
+
+
+class Library(Directory, GFSObject):
+
+    def __init__(self, hist_id, gfs):
+        super(Library, self).__init__(gfs)
+        self.hist = self.gfs.gi.libraries.get(hist_id)
+
+    def rmdir(self, path):
+        self.gfs.gi.libraries.delete(self.hist.id)
+
+    def rename(self, old, new):
+        path = new[:new.rfind(os.path.sep)]
+
+        if path != '/libraries':
+            raise FuseOSError(EPERM)
+        name = new[new.rfind(os.path.sep)+1:]
+        self.hist.update(name=name)
+
+    def readdir(self, path=None, fh=None):
+        return [
+            '{}. {} [{}]'.format(x.wrapped['hid'], x.name, x.id)
+            for x in self.hist.content_infos if not x.deleted
+        ] + super(Library, self).readdir()
+
+    def getDataset(self, dataset_id):
+        return LibraryDataset(self.hist, dataset_id, self.gfs)
+
+
+class LibraryDataset(File, GFSObject):
+
+    def __init__(self, hist, dataset_id, gfs):
+        super(LibraryDataset, self).__init__(gfs)
         self.dataset = hist.get_dataset(dataset_id)
 
     def unlink(self, path):
