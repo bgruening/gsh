@@ -1,13 +1,12 @@
 #!/usr/bin/python
 # needs shoutout to a couple of gits...
-
 import os
 import time
 import argparse
-from errno import *
+from errno import EFAULT, ENOENT, EPERM
 from bioblend.galaxy import objects
 from bioblend.galaxy.client import ConnectionError
-from stat import S_IFDIR, S_IFREG, S_IFLNK
+from stat import S_IFDIR, S_IFREG
 from fuse import Operations
 from fuse import FUSE, FuseOSError
 
@@ -17,8 +16,9 @@ class GFSObject(Operations):
     def __init__(self, gfs):
         self.gfs = gfs
 
+
 class GFSManager(Operations):
-    context = None #should be abstract to force sub-class implementation
+    context = None  # should be abstract to force sub-class implementation
 
     def delegate(self, op, *args):
 
@@ -30,27 +30,29 @@ class GFSManager(Operations):
 
         return getattr(boundObj, op)(*args)
 
+
 class GalaxyFS(Operations):
 
     def __init__(self, galaxy_url, api_key):
         self.gi = objects.GalaxyInstance(url=galaxy_url, api_key=api_key)
         self.root = RootDirectory()
 
-        #TODO: for all subclasses of GFSObject register path, module grab classes inspect inheritance, b00m
+        # TODO: for all subclasses of GFSObject register path, module grab
+        # classes inspect inheritance, b00m
         self.path_bindings = {
-                                RootDirectory.context : self.root,
-                                HistoryManager.context : HistoryManager(self),
-                             }
+            RootDirectory.context: self.root,
+            HistoryManager.context: HistoryManager(self),
+        }
 
     def _path_bound(self, path):
         pbits = path.split(os.path.sep)
 
-        if len(pbits) == 1: # ['']/
+        if len(pbits) == 1:  # ['']/
             bind = self.path_bindings.get(path)
-        elif len(pbits) > 1: # e.g. ['']/['histories']/['Unnamed History [8997977]']
+        elif len(pbits) > 1:  # e.g. ['']/['histories']/['Unnamed History [8997977]']
             bind = self.path_bindings.get(pbits[1], False)
-            if not bind: # i.e. top level directory couldn't match
-                bind = self.root # delegate handling to root directory
+            if not bind:  # i.e. top level directory couldn't match
+                bind = self.root  # delegate handling to root directory
 
         return bind
 
@@ -59,33 +61,36 @@ class GalaxyFS(Operations):
         boundObj = self._path_bound(args[0])
         return boundObj.delegate(op, *args)
 
-class Directory(): #should subclass file? or fusepy object?
+
+class Directory():  # should subclass file? or fusepy object?
 
     def readdir(self, path=None, fh=None):
-        return ['.','..']
+        return ['.', '..']
 
     def getattr(self, path=None, fh=None):
 
-        st = dict(st_mode=(S_IFDIR | 0700), st_nlink=2) #TODO: nlinks
+        st = dict(st_mode=(S_IFDIR | 0700), st_nlink=2)  # TODO: nlinks
         # do we want actual create times?
         st['st_ctime'] = st['st_mtime'] = st['st_atime'] = time.time()
         st['st_uid'] = os.geteuid()
         st['st_gid'] = os.getegid()
         return st
+
 
 class File():
 
     def getattr(self, path=None, fh=None):
-        st = dict(st_mode=(S_IFREG | 0400), st_nlink=2) #TODO: nlinks
+        st = dict(st_mode=(S_IFREG | 0400), st_nlink=2)  # TODO: nlinks
         # do we want actual create times?
         st['st_ctime'] = st['st_mtime'] = st['st_atime'] = time.time()
         st['st_uid'] = os.geteuid()
         st['st_gid'] = os.getegid()
         return st
 
+
 class RootDirectory(Directory, GFSManager):
     context = '/'
-    tlds = ['histories']#, 'libraries', 'tools', 'workflows']
+    tlds = ['histories']  # , 'libraries', 'tools', 'workflows']
 
     def _path_bound(self, path):
         return self
@@ -93,7 +98,7 @@ class RootDirectory(Directory, GFSManager):
     def getattr(self, path=None, fh=None):
 
         if path == '/':
-            st = dict(st_mode=(S_IFDIR | 0500), st_nlink=2) #TODO: nlinks
+            st = dict(st_mode=(S_IFDIR | 0500), st_nlink=2)  # TODO: nlinks
             # do we want actual create times?
             st['st_ctime'] = st['st_mtime'] = st['st_atime'] = time.time()
             st['st_uid'] = os.geteuid()
@@ -104,6 +109,7 @@ class RootDirectory(Directory, GFSManager):
 
     def readdir(self, path=None, fh=None):
         return RootDirectory.tlds+super(RootDirectory, self).readdir()
+
 
 class HistoryManager(GFSObject, GFSManager):
     context = 'histories'
@@ -118,18 +124,19 @@ class HistoryManager(GFSObject, GFSManager):
             del self.transactionMap[path]
         else:
             wd = path.split(os.path.sep)
-        if len(wd) == 2: #== /histories -> Histories
+        if len(wd) == 2:  # == /histories -> Histories
             return Histories(self)
-        elif len(wd) == 3: #== /histories/Unnamed History [8997977]/ -> History
+        elif len(wd) == 3:  # == /histories/Unnamed History [8997977]/ -> History
             hist_id = wd[2][wd[2].rfind('[')+1:wd[2].rfind(']')]
             try:
                 return History(hist_id, self.gfs)
             except ConnectionError:
                 return Histories(self)
-        elif len(wd) == 4: #== /histories/Unnamed History [8997977]/Pasted Entry [5969b1f7201f12ae] -> HistoryDataset
+        elif len(wd) == 4:  # == /histories/Unnamed History [8997977]/Pasted Entry [5969b1f7201f12ae] -> HistoryDataset
             hist_id = wd[2][wd[2].rfind('[')+1:wd[2].rfind(']')]
             dataset_id = wd[3][wd[3].rfind('[')+1:wd[3].rfind(']')]
             return History(hist_id, self.gfs).getDataset(dataset_id)
+
 
 class Histories(Directory, GFSObject):
 
@@ -150,6 +157,7 @@ class Histories(Directory, GFSObject):
         new_hist = self.gfs.gi.histories.create(path[path.rfind(os.path.sep)+1:])
         self.manager.transactionMap[path] = '/histories/{} [{}]'.format(new_hist.name, new_hist.id)
 
+
 class History(Directory, GFSObject):
 
     def __init__(self, hist_id, gfs):
@@ -168,10 +176,14 @@ class History(Directory, GFSObject):
         self.hist.update(name=name)
 
     def readdir(self, path=None, fh=None):
-        return ['{}. {} [{}]'.format(x.wrapped['hid'], x.name, x.id) for x in self.hist.content_infos if not x.deleted]+super(History, self).readdir()
+        return [
+            '{}. {} [{}]'.format(x.wrapped['hid'], x.name, x.id)
+            for x in self.hist.content_infos if not x.deleted
+        ] + super(History, self).readdir()
 
     def getDataset(self, dataset_id):
         return HistoryDataset(self.hist, dataset_id, self.gfs)
+
 
 class HistoryDataset(File, GFSObject):
 
@@ -194,4 +206,3 @@ if __name__ == '__main__':
         os.makedirs(args.mountpoint)
 
     fuse = FUSE(GalaxyFS(args.galaxy_url, args.api_key), args.mountpoint, foreground=True, nothreads=True, ro=False)
-
