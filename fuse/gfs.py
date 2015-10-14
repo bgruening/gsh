@@ -4,15 +4,15 @@ import os
 import time
 import argparse
 from errno import EFAULT, ENOENT, EPERM
+from bioblend import galaxy
 from bioblend.galaxy import objects
 from bioblend.galaxy.client import ConnectionError
 from stat import S_IFDIR, S_IFREG
 from fuse import Operations
 from fuse import FUSE, FuseOSError
 
-from repoze.lru import lru_cache
 import logging
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 log = logging.getLogger()
 
 
@@ -43,6 +43,7 @@ class GalaxyFS(Operations):
 
     def __init__(self, galaxy_url, api_key):
         self.gi = objects.GalaxyInstance(url=galaxy_url, api_key=api_key)
+        self.pgi = galaxy.GalaxyInstance(url=galaxy_url, key=api_key)
         self.root = RootDirectory()
 
         # TODO: for all subclasses of GFSObject register path, module grab
@@ -71,7 +72,8 @@ class GalaxyFS(Operations):
         return boundObj.delegate(op, *args)
 
 
-class Directory():  # should subclass file? or fusepy object?
+class Directory():
+    # should subclass file? or fusepy object?
 
     def readdir(self, path=None, fh=None):
         return ['.', '..']
@@ -87,6 +89,9 @@ class Directory():  # should subclass file? or fusepy object?
 
     def _format_path(self, iterable):
         return ["{0.name} [{0.id}]".format(x) for x in iterable]
+
+    def _format_path_plain(self, iterable):
+        return ["{name} [{id}]".format(**x) for x in iterable if not x['deleted']]
 
 
 class File():
@@ -215,7 +220,6 @@ class LibraryManager(GFSObject, GFSManager):
         self.transactionMap = {}
 
     def _path_bound(self, path):
-        import pprint; pprint.pprint(self.transactionMap)
         if path in self.transactionMap:
             wd = self.transactionMap.get(path).split(os.path.sep)
             del self.transactionMap[path]
@@ -224,16 +228,13 @@ class LibraryManager(GFSObject, GFSManager):
 
         if len(wd) == 2:  # == /libraries -> Libraries
             return Libraries(self)
-        elif len(wd) == 3:  # == /libraries/Unnamed Library [8997977]/ -> Library
+        elif len(wd) >= 3:  # == /libraries/Unnamed Library [8997977]/ -> Library,
+                            # /libraries/Unnamed Library [8997977]/* -> Folder, Datasets
             lib_id = self._id_from_path(wd[2])
             try:
                 return Library(lib_id, self.gfs)
             except ConnectionError:
                 return Libraries(self)
-        elif len(wd) == 4:  # == /libraries/Unnamed Library [8997977]/Pasted Entry [5969b1f7201f12ae] -> LibraryDataset
-            lib_id = self._id_from_path(wd[2])
-            dataset_id = self._id_from_path(wd[3])
-            return Library(lib_id, self.gfs).getDataset(dataset_id)
 
 
 class Libraries(Directory, GFSObject):
@@ -248,12 +249,11 @@ class Libraries(Directory, GFSObject):
         else:
             raise FuseOSError(ENOENT)
 
-    @lru_cache(maxsize=100)
-    def __list_libraries(self):
-        return self.gfs.gi.libraries.list()
-
     def readdir(self, path=None, fh=None):
-        return ['.', '..'] + self._format_path(self.__list_libraries())
+        # perms? Maybe this is what .list() provides
+        libs = self.gfs.pgi.libraries.get_libraries()
+        return ['.', '..'] + self._format_path_plain(libs)
+        # return ['.', '..'] + self._format_path(self.gfs.gi.libraries.list())
 
     def mkdir(self, path=None, mode=None):
         new_lib = self.gfs.gi.libraries.create(path[path.rfind(os.path.sep)+1:])
@@ -262,11 +262,13 @@ class Libraries(Directory, GFSObject):
 
 class Library(Directory, GFSObject):
 
-    def __init__(self, lib_id, gfs):
+    def __init__(self, lib_id, gfs, folder_path=None):
         super(Library, self).__init__(gfs)
         self.lib = self.gfs.gi.libraries.get(lib_id)
+        self.folder_path = folder_path
 
     def rmdir(self, path):
+        """rmdir called on parent library object"""
         self.gfs.gi.libraries.delete(self.lib.id)
 
     def rename(self, old, new):
@@ -278,13 +280,49 @@ class Library(Directory, GFSObject):
         self.lib.update(name=name)
 
     def readdir(self, path=None, fh=None):
-        return [
-            '{}. {} [{}]'.format(x.wrapped['hid'], x.name, x.id)
-            for x in self.lib.content_infos if not x.deleted
-        ] + super(Library, self).readdir()
+        # Definitely cache this one.
+        library_contents = self.gfs.pgi.libraries.show_library(self.lib.id, contents=True)
+        wd = path.split(os.path.sep)
+        fp = wd[3:]
 
-    def getDataset(self, dataset_id):
-        return LibraryDataset(self.lib, dataset_id, self.gfs)
+        print 'FP: ', fp
+        interested_paths = []
+
+        for thing in library_contents[1:]:
+            thing_path = thing['name'][1:].split(os.path.sep)
+
+            # If the fp, the user's requested subpath in this library is shared
+            # with the given library path item
+            if fp == thing_path[0:len(fp)]:
+                # If it's one level beyond that, so everything in that folder
+                if len(thing_path) == len(fp) + 1:
+                    if thing['type'] == 'file':
+                        interested_paths.append(LibraryDataset(self.lib, thing['id'], self.gfs))
+                    else:
+                        interested_paths.append(LibraryFolder(self.lib, thing['id'], self.gfs, self))
+
+        return interested_paths + super(Library, self).readdir()
+
+
+class LibraryFolder(Directory, GFSObject):
+
+    def __init__(self, lib, folder_id, gfs, library):
+        super(LibraryFolder, self).__init__(gfs)
+        # self.lib = self.gfs.gi.libraries.get(lib_id)
+        self.lib = lib
+        self.folder_id = folder_id
+        self.library = library
+
+    def rmdir(self, path):
+        self.gfs.pgi.folders.delete_folder(self.folder_id)
+
+    def rename(self, old, new):
+        return
+
+    def readdir(self, path=None, fh=None):
+        results = self.library.readdir(path=path)
+        print results
+        return results
 
 
 class LibraryDataset(File, GFSObject):
