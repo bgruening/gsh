@@ -19,14 +19,47 @@ class memoize(dict):
     https://wiki.python.org/moin/PythonDecoratorLibrary#Memoize
     """
     def __init__(self, func):
+        """Decorated function is stored in self.func"""
         self.func = func
 
-    def __call__(self, *args):
-        return self[args]
+    def __call__(self, *args, **kwargs):
+        """This intercepts the function call, and stores the result in self
+        (it's a dictionary subclass).
+
+        We key the dictionary based on parameters it was called with
+        """
+        return self[self.__gen_key(*args, **kwargs)]
 
     def __missing__(self, key):
-        result = self[key] = self.func(*key)
-        return result
+        """If the result is missing from the self dictionary, this method is called.
+
+        Here we unpack the key, call the function, and store the result in self
+        as well as returning it."""
+        args, kwargs = self.__unpack_key(key)
+        self[key] = self.func(*args, **kwargs)
+        return self[key]
+
+    def __gen_key(self, *args, **kwargs):
+        """
+        How we generate a key. Must be a hashable type, hence the casting to tuple
+        """
+        return args + tuple([(k, v) for (k, v) in kwargs.iteritems()])
+
+    def __unpack_key(self, key):
+        """
+         Reverse of __gen_key(), unpack tuple back into args+kwargs
+        """
+        args = []
+        kwargs = {}
+        for x in key:
+            # TODO: This feels prone to failure. What if someone passes a tuple
+            # as a regular arg? What then?
+            if isinstance(x, tuple):
+                k, v = x
+                kwargs[k] = v
+            else:
+                args.append(x)
+        return args, kwargs
 
 
 class GFSObject(Operations):
@@ -98,6 +131,9 @@ class Directory():  # should subclass file? or fusepy object?
         st['st_gid'] = os.getegid()
         return st
 
+    def _format_path(self, iterable):
+        return ["{0.name} [{0.id}]".format(x) for x in iterable]
+
 
 class File():
 
@@ -112,7 +148,7 @@ class File():
 
 class RootDirectory(Directory, GFSManager):
     context = '/'
-    tlds = ['histories']  # , 'libraries', 'tools', 'workflows']
+    tlds = ['histories', 'libraries']  # , 'tools', 'workflows']
 
     def _path_bound(self, path):
         return self
@@ -130,7 +166,7 @@ class RootDirectory(Directory, GFSManager):
             raise FuseOSError(ENOENT)
 
     def readdir(self, path=None, fh=None):
-        return RootDirectory.tlds+super(RootDirectory, self).readdir()
+        return RootDirectory.tlds + super(RootDirectory, self).readdir()
 
 
 class HistoryManager(GFSObject, GFSManager):
@@ -230,18 +266,20 @@ class LibraryManager(GFSObject, GFSManager):
             del self.transactionMap[path]
         else:
             wd = path.split(os.path.sep)
+
         if len(wd) == 2:  # == /libraries -> Libraries
             return Libraries(self)
         elif len(wd) == 3:  # == /libraries/Unnamed Library [8997977]/ -> Library
-            hist_id = self.__id_from_path(wd[2])
+            lib_id = self.__id_from_path(wd[2])
+            # TODO: retry?
             try:
-                return Library(hist_id, self.gfs)
+                return Library(lib_id, self.gfs)
             except ConnectionError:
                 return Libraries(self)
         elif len(wd) == 4:  # == /libraries/Unnamed Library [8997977]/Pasted Entry [5969b1f7201f12ae] -> LibraryDataset
-            hist_id = self.__id_from_path(wd[2])
+            lib_id = self.__id_from_path(wd[2])
             dataset_id = self.__id_from_path(wd[3])
-            return Library(hist_id, self.gfs).getDataset(dataset_id)
+            return Library(lib_id, self.gfs).getDataset(dataset_id)
 
 
 class Libraries(Directory, GFSObject):
@@ -256,8 +294,11 @@ class Libraries(Directory, GFSObject):
         else:
             raise FuseOSError(ENOENT)
 
+    # @memoize
     def readdir(self, path=None, fh=None):
-        return [x.name+' ['+x.id+']' for x in self.gfs.gi.libraries.list()]+super(Libraries, self).readdir()
+        # return super(Libraries, self).readdir() + \
+        return ['.', '..'] + \
+            self._format_path(self.gfs.gi.libraries.list())
 
     def mkdir(self, path=None, mode=None):
         pass
@@ -267,12 +308,12 @@ class Libraries(Directory, GFSObject):
 
 class Library(Directory, GFSObject):
 
-    def __init__(self, hist_id, gfs):
+    def __init__(self, lib_id, gfs):
         super(Library, self).__init__(gfs)
-        self.hist = self.gfs.gi.libraries.get(hist_id)
+        self.lib = self.gfs.gi.libraries.get(lib_id)
 
     def rmdir(self, path):
-        self.gfs.gi.libraries.delete(self.hist.id)
+        self.gfs.gi.libraries.delete(self.lib.id)
 
     def rename(self, old, new):
         path = new[:new.rfind(os.path.sep)]
@@ -280,23 +321,23 @@ class Library(Directory, GFSObject):
         if path != '/libraries':
             raise FuseOSError(EPERM)
         name = new[new.rfind(os.path.sep)+1:]
-        self.hist.update(name=name)
+        self.lib.update(name=name)
 
     def readdir(self, path=None, fh=None):
         return [
             '{}. {} [{}]'.format(x.wrapped['hid'], x.name, x.id)
-            for x in self.hist.content_infos if not x.deleted
+            for x in self.lib.content_infos if not x.deleted
         ] + super(Library, self).readdir()
 
     def getDataset(self, dataset_id):
-        return LibraryDataset(self.hist, dataset_id, self.gfs)
+        return LibraryDataset(self.lib, dataset_id, self.gfs)
 
 
 class LibraryDataset(File, GFSObject):
 
-    def __init__(self, hist, dataset_id, gfs):
+    def __init__(self, lib, dataset_id, gfs):
         super(LibraryDataset, self).__init__(gfs)
-        self.dataset = hist.get_dataset(dataset_id)
+        self.dataset = lib.get_dataset(dataset_id)
 
     def unlink(self, path):
         self.dataset.delete()
